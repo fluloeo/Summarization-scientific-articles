@@ -1,4 +1,4 @@
 # Мои попытки реализовать суммаризацию
-- файл inference qwen - использует vllm и langchain
-- rag prototype - попытка реализовать rag на вектороной бд
-- файл sum-art включает подсчеты классических метрик
+- inference qwen - суммаризация с vllm и langchain модели Qwen3-4B-Instruct-2507
+- rag prototype - попытка реализовать rag на вектороной бд chroma
+- файл sum-art включает подсчеты классических метрик (устарел)
