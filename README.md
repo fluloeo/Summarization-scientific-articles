@@ -117,3 +117,59 @@ graph TD
     style Critic fill:#e1f5fe,stroke:#01579b
     style OtherHandler fill:#ffebee,stroke:#c62828
 ```
+
+```mermaid
+graph TD
+    %% Основные пути
+    Start((START)) --> Classifier{Classifier}
+
+    subgraph "QA Strategy (Multi-Source RAG)"
+        direction TB
+        Rewriter --> LanceDB[(LanceDB)]
+        LanceDB --> FoundChunks[Found Top-K Chunks]
+        FoundChunks --> Deduplicate[Deduplication by Chunk ID]
+        Deduplicate --> MergeChunks[Merge Unique Chunks into Single Context]
+        MergeChunks --> QA_LLM[QA LLM Node]
+    end
+
+    subgraph "Summarization Strategy (Map-Reduce + Critic)"
+        direction TB
+        Postgres[(PostgreSQL)] --> FetchFullText[Fetch Full Article JSON/Dict]
+        FetchFullText --> Processor[Article Processor: Merge & Split]
+        
+        subgraph "Map-Reduce with Overlaps"
+            Processor --> Chunk1[Chunk 1 + Overlaps]
+            Processor --> Chunk2[Chunk 2 + Overlaps]
+            Processor --> ChunkN[Chunk N + Overlaps]
+            
+            Chunk1 --> Map1[Map Summarizer]
+            Chunk2 --> Map2[Map Summarizer]
+            ChunkN --> MapN[Map Summarizer]
+            
+            Map1 & Map2 & MapN --> Reduce[Reduce: Final Synthesis]
+        end
+
+        subgraph "Critic Audit Loop"
+            Reduce --> CriticVerify[Critic: Chunk-by-Chunk Verification]
+            CriticVerify -->|Compare| Chunk1 & Chunk2 & ChunkN
+            CriticVerify -->|Found Errors| CriticCorrection[Critic: Global Correction]
+            CriticCorrection --> FinalReport[Final Corrected Report]
+        end
+    end
+
+    %% Связи между блоками
+    Classifier -->|Intent: NO| Rewriter
+    Classifier -->|Intent: YES| Postgres
+    
+    QA_LLM --> End((END))
+    Reduce -->|use_critic = False| End
+    FinalReport --> End
+
+    %% Стилизация
+    style Start fill:#f9f,stroke:#333
+    style End fill:#f9f,stroke:#333
+    style Classifier fill:#fff4dd,stroke:#d4a017
+    style QA_LLM fill:#e1f5fe,stroke:#01579b
+    style FinalReport fill:#e8f5e9,stroke:#2e7d32
+    style CriticVerify fill:#fff9c4,stroke:#fbc02d
+```
