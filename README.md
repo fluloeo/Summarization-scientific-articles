@@ -120,79 +120,89 @@ graph TD
 
 ```mermaid
 graph TD
-    %% Точка входа
-    Start((START)) --> Classifier{Intent?}
+    %% ================= СТИЛИ =================
+    style Start fill:#212121,stroke:#fff,stroke-width:2px,color:#fff
+    style End fill:#212121,stroke:#fff,stroke-width:2px,color:#fff
+    style Classifier fill:#ffcc80,stroke:#e65100,stroke-width:2px
+    style Other fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px
+    style LanceDB fill:#b3e5fc,stroke:#01579b,stroke-width:2px
+    style PostgreSQL fill:#b3e5fc,stroke:#01579b,stroke-width:2px
+    style CriticCorrect fill:#f8bbd0,stroke:#880e4f,stroke-width:2px
+    style MapReduce fill:#c8e6c9,stroke:#1b5e20,stroke-width:2px
 
-    %% ВЕТКА QA
-    subgraph QA_Path [Strategy: RAG Response]
+    %% ================= ВХОД И РОУТИНГ =================
+    Start((User Query)) --> Classifier{<b>Classifier Node</b><br/>Parse Intent}
+    Classifier -->|OTHER| Other[<b>Other Node</b><br/>Return default message]
+    Other --> End((END))
+
+    %% ================= ПОИСКОВЫЙ БЛОК =================
+    subgraph Information Retrieval
         direction TB
-        Rewriter[Query Rewriter<br/><i>Gen 5 Queries</i>]
-        Search[Multi-Search<br/><i>LanceDB</i>]
+        Rewriter[<b>Rewriter Node</b><br/>Generate 3-5 sub-queries]
+        LanceDB[(<b>LanceDB</b><br/>Vector Search)]
+        Dedup{<b>Deduplication</b>}
         
-        subgraph QA_Fusion [Context Consolidation]
-            C1[Chunk A]
-            C2[Chunk B]
-            C3[Chunk C]
-            Deduplicate[<b>Deduplication</b><br/>by ID/Text]
-            Merge[<b>Final Context</b><br/>Merged Chunks]
-        end
-
-        Rewriter --> Search
-        Search --> C1 & C2 & C3
-        C1 & C2 & C3 --> Deduplicate --> Merge
-        Merge --> QA_Node[QA Answer Node]
+        Classifier -->|YES / NO| Rewriter
+        Rewriter --> LanceDB
+        LanceDB --> Dedup
+        
+        Dedup -->|Intent: NO<br/>Drop by Chunk ID| DocsQA[Unique Chunks List]
+        Dedup -->|Intent: YES<br/>Drop by Article ID| TopDoc[Single Top Article ID]
     end
 
-    %% ВЕТКА SUMMARIZATION
-    subgraph Sum_Path [Strategy: Map-Reduce + Audit]
+    %% ================= ВЕТКА QA =================
+    subgraph QA Pipeline
         direction TB
-        DB[(PostgreSQL)] --> Processor[Article Processor]
+        QAContext[Concat all chunks into one context]
+        QAGen[<b>QA Node (LLM)</b><br/>Generate Answer]
         
-        subgraph Chunks_With_Overlaps [Step 1: Data Preparation]
+        DocsQA --> QAContext --> QAGen
+    end
+    QAGen --> End
+
+    %% ================= ВЕТКА СУММАРИЗАЦИИ =================
+    subgraph Summarization Pipeline
+        direction TB
+        PostgreSQL[(<b>PostgreSQL</b><br/>Full Text)]
+        Parse[<b>Parser</b><br/>json.loads / ast.literal_eval]
+        
+        TopDoc --> PostgreSQL --> Parse
+        
+        subgraph Article Processor
+            direction TB
+            Merge[Merge chunks < min_tokens]
+            Overlaps[<b>Create Overlaps</b><br/>Add Past & Future Context]
+            Merge --> Overlaps
+        end
+        Parse --> Merge
+        
+        subgraph MapReduce [Map-Reduce Execution]
             direction LR
-            P1[Past] -.-> M1[<b>Chunk 1</b>]
-            M1 -.-> F1[Future]
-            P2[Past] -.-> M2[<b>Chunk 2</b>]
-            M2 -.-> F2[Future]
+            C1[Chunk 1<br/>+ Context] --> M1(Map LLM)
+            C2[Chunk 2<br/>+ Context] --> M2(Map LLM)
+            CN[Chunk N<br/>+ Context] --> MN(Map LLM)
             
-            note[<i>Overlaps preserve<br/>context between sections</i>]
+            M1 & M2 & MN --> Join[Concat Summaries] --> Reduce(<b>Reduce LLM</b><br/>Final Report)
         end
-
-        subgraph Map_Reduce_Phase [Step 2: Summarization]
-            direction TB
-            M1 --> Map1[Map]
-            M2 --> Map2[Map]
-            Map1 & Map2 --> Reduce[<b>Reduce</b><br/>Synthesis of Draft]
-        end
-
-        subgraph Critic_Audit [Step 3: Verification Loop]
-            direction TB
-            Reduce --> Draft[Draft Report]
-            
-            %% Линии аудита (контроль)
-            Draft --> Auditor{<b>Critic Node</b><br/>Fact Checker}
-            Auditor -.->|Cross-Check| M1
-            Auditor -.->|Cross-Check| M2
-            
-            Auditor -->|Found Errors| Correction[<b>Final Correction</b><br/>Fix Hallucinations]
-            Auditor -->|OK| Verified[Verified Report]
-        end
+        Overlaps --> MapReduce
     end
 
-    %% Финальные связи
-    Classifier -->|NO| Rewriter
-    Classifier -->|YES| DB
+    %% ================= ВЕТКА КРИТИКА =================
+    subgraph Critic Audit Loop
+        direction TB
+        Verify[<b>Critic Verify (LLM)</b><br/>Compare Report vs EACH Original Chunk]
+        CheckErrors{Notes empty?}
+        CriticCorrect[<b>Critic Correction (LLM)</b><br/>Fix Report using Notes]
+        
+        Reduce --> Verify
+        %% Пунктирная линия показывает, что Критик берет данные из Processor
+        Overlaps -.->|Original Text| Verify 
+        
+        Verify --> CheckErrors
+        CheckErrors -->|Yes: OK| FinalOk[Keep Original Report]
+        CheckErrors -->|No: Found Errors| CriticCorrect
+    end
 
-    QA_Node --> End((END))
-    Verified --> End
-    Correction --> End
-
-    %% Стилизация
-    style Start fill:#f9f,stroke:#333
-    style End fill:#f9f,stroke:#333
-    style Classifier fill:#fff4dd,stroke:#d4a017
-    style Critic_Audit fill:#f0f4ff,stroke:#01579b,stroke-dasharray: 5 5
-    style Chunks_With_Overlaps fill:#f1f8e9,stroke:#2e7d32
-    style Auditor fill:#ffeb3b,stroke:#fbc02d
-    style Deduplicate fill:#e1f5fe,stroke:#01579b
+    FinalOk --> End
+    CriticCorrect --> End
 ```
