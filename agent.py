@@ -16,6 +16,7 @@ class AgentState(TypedDict):
     final_answer: str
     debug_data: dict
     critic_notes: List[str]
+    
 
 class BaseRetriever(ABC):
     @abstractmethod
@@ -44,7 +45,8 @@ class ArxivAgent:
         prompts, 
         use_critic: bool = False, 
         local_prompts=None, 
-        use_hub: bool = True
+        use_hub: bool = True,
+        debug_mode: bool = False
     ):
         self.llm = llm_provider
         self.retriever = retriever
@@ -55,6 +57,7 @@ class ArxivAgent:
         self.tokenizer = tokenizer
         self.use_hub = use_hub
         self.use_critic = use_critic 
+        self.debug_mode = debug_mode
         self.local_prompts = local_prompts or {}
         
         self.resolved_prompts = {}
@@ -154,6 +157,9 @@ class ArxivAgent:
         return {"relevant_docs": final_df.head(10)}
 
     def qa_node(self, state: AgentState):
+        if self.debug_mode:
+            chunk_count = len(state['relevant_docs'])
+            return {"final_answer": f"DEBUG MODE: Поиск завершен. Найдено чанков: {chunk_count}. Генерация ответа пропущена."}
         ctx = "\n\n".join(state['relevant_docs']['text'].tolist())
         p = self._format_node_chat('qa', {"context": ctx, "query": state['query']})
         ans = self.llm.generate([p], {"max_tokens": 1024, "temperature": 0})[0]
@@ -162,6 +168,8 @@ class ArxivAgent:
     def summarization_node(self, state: AgentState):
         if state['relevant_docs'].empty: return {"final_answer": "Статьи не найдены."}
         top_article_id = str(state['relevant_docs'].iloc[0]['article_id'])
+        if self.debug_mode:
+            return {"final_answer": f"DEBUG MODE: Выбрана статья ID {top_article_id} для суммаризации. Генерация отчета пропущена."}
         db_data = self._fetch(top_article_id)
         
         if not db_data: 
@@ -201,6 +209,8 @@ class ArxivAgent:
 
     def critic_node(self, state: AgentState):
         """Нода-критик: сначала проверяет все чанки (verify), затем исправляет (correction)."""
+        if self.debug_mode:
+            return {"critic_notes": ["DEBUG MODE: Критик пропущен."]}
         summary = state['final_answer']
         chunks = state['article_chunks']
         notes = []

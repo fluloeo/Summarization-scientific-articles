@@ -17,15 +17,18 @@
 
 ## Ключевые технические решения
 
-### 1. Система самокоррекции (Critic Loop)
-Для исключения фактических ошибок в научных отчетах внедрен механизм "критика":
-*   **Verification:** Пакетная проверка каждого смыслового чанка статьи на соответствие итоговому отчету.
-*   **Correction:** Если найдены несоответствия (неверные метрики, искаженные выводы), агент формирует список правок и пересобирает финальный текст.
 
-### 2. Map-Reduce с контекстным перекрытием (Overlaps)
-Для работы с длинными статьями используется кастомный алгоритм обработки:
-*   **Context Overlaps:** К каждому чанку на этапе Map добавляется "память" (past/future overlap) — фрагменты соседних секций. Это сохраняет логическую связность на границах разделов.
-*   **Section Merging:** Короткие подразделы объединяются до порога `min_tokens`, минимизируя количество вызовов API без потери контекста.
+### 1. Двухстадийный Article Processor (Merge & Split)
+Для решения проблемы лимита контекста и сохранения структуры статьи реализован продвинутый алгоритм подготовки данных:
+*   **Stage 1: Token-Aware Merging.** Мелкие подразделы статьи объединяются с соседями, пока не достигнут порога `min_tokens`. Это минимизирует количество вызовов LLM.
+*   **Stage 2: Recursive Splitting.** Если после слияния или изначально секция превышает `max_tokens`, она рекурсивно разбивается на части. При этом сохраняется строгая нумерация в заголовках (например, *"Methodology (Part 1)"*), что помогает модели на этапе Map сохранять контекст.
+*   **Stage 3: Custom Overlaps.** К каждому финальному чанку добавляются "теневые" контексты (`past_overlap` и `future_overlap`) из соседних фрагментов, обеспечивая плавность переходов в суммаризации.
+
+### 2. Система верификации (Critic Loop)
+В отличие от простых суммаризаторов, агент проводит финальный аудит:
+*   **Parallel Audit:** Каждый оригинальный фрагмент текста сравнивается с итоговым отчетом.
+*   **Error Classification:** Критик помечает ошибки типов `[NUM]` (цифры), `[TERM]` (термины) или `[LOGIC]`.
+*   **Correction:** На основе собранных заметок модель делает финальный "чистовик".
 
 ---
 
@@ -185,6 +188,111 @@ graph TD
             direction LR
             C1["Chunk 1 + Overlaps"] --> M1("Map Summarizer")
             C2["Chunk 2 + Overlaps"] --> M2("Map Summarizer")
+            CN["Chunk N + Overlaps"] --> MN("Map Summarizer")
+            
+            M1 & M2 & MN --> Join["Concat Summaries"] --> Reduce("Reduce: Final Synthesis")
+        end
+        Overlaps --> Map_Reduce_Phase
+    end
+
+    %% ================= ВЕТКА КРИТИКА =================
+    subgraph Critic_Audit_Loop ["Critic Audit Loop"]
+        direction TB
+        Draft["Draft Summary Report"]
+        
+        subgraph Per_Chunk_Verification ["Per-Chunk Verification"]
+            Verify["Critic Verify: Parallel Audit"]
+        end
+
+        CheckErrors{"Notes empty?"}
+        CriticCorrect["Critic Correction: Fix Report using Notes"]
+        
+        Reduce --> Draft
+        Draft --> Verify
+        
+        %% Показываем, что оригинальные чанки подаются в критика поштучно
+        C1 & C2 & CN -.->|"Iterate Original Text"| Verify 
+        
+        Verify --> CheckErrors
+        CheckErrors -->|"Yes: OK"| FinalOk["Keep Original Report"]
+        CheckErrors -->|"No: Errors Found"| CriticCorrect
+    end
+
+    FinalOk --> End
+    CriticCorrect --> End
+```
+
+## Визуализация логики обработки (Детальный граф)
+
+```mermaid
+graph TD
+    %% ================= СТИЛИ =================
+    style Start fill:#212121,stroke:#fff,stroke-width:2px,color:#fff
+    style End fill:#212121,stroke:#fff,stroke-width:2px,color:#fff
+    style Classifier fill:#ffcc80,stroke:#e65100,stroke-width:2px
+    style Other fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px
+    style LanceDB fill:#b3e5fc,stroke:#01579b,stroke-width:2px
+    style PostgreSQL fill:#b3e5fc,stroke:#01579b,stroke-width:2px
+    style CriticNode fill:#f8bbd0,stroke:#880e4f,stroke-width:2px
+    style MapReduce fill:#c8e6c9,stroke:#1b5e20,stroke-width:2px
+
+    %% ================= ВХОД И РОУТИНГ =================
+    Start((User Query)) --> Classifier{"Classifier Node (Intent?)"}
+    Classifier -->|"OTHER"| Other["Other Node: Default Message"]
+    Other --> End((END))
+
+    %% ================= ПОИСКОВЫЙ БЛОК =================
+    subgraph Information_Retrieval ["Information Retrieval"]
+        direction TB
+        Rewriter["Rewriter Node: Multi-Query Generation"]
+        
+        subgraph Vector_Search ["Vector Search (LanceDB)"]
+            Q1["Query 1 -> 5 results"]
+            Q2["Query 2 -> 5 results"]
+            QN["Query N -> 5 results"]
+        end
+
+        Dedup{"Deduplication Logic"}
+        
+        Classifier -->|"YES / NO"| Rewriter
+        Rewriter --> Q1 & Q2 & QN
+        Q1 & Q2 & QN --> Dedup
+        
+        Dedup -->|"Intent: NO (QA)"| DocsQA["Unique Chunks List"]
+        Dedup -->|"Intent: YES (Sum)"| TopDoc["Single Top Article ID"]
+    end
+
+    %% ================= ВЕТКА QA =================
+    subgraph QA_Pipeline ["QA Pipeline"]
+        direction TB
+        QAContext["Concat Chunks to Single Context"]
+        QAGen["QA Node: Answer Generation"]
+        
+        DocsQA --> QAContext --> QAGen
+    end
+    QAGen --> End
+
+    %% ================= ВЕТКА СУММАРИЗАЦИИ =================
+    subgraph Summarization_Pipeline ["Summarization Pipeline"]
+        direction TB
+        PostgreSQL[("PostgreSQL: Fetch Parsed Sections")]
+        
+        subgraph Article_Processor ["Article Processor Pipeline"]
+            direction TB
+            Merge["Merge Stage: Combine < min_tokens"]
+            Split["Split Stage: Recursive Split > max_tokens"]
+            Overlaps["Overlap Stage: Add Past/Future Context"]
+            
+            Merge --> Split --> Overlaps
+        end
+
+        TopDoc --> PostgreSQL
+        PostgreSQL -->|"Parsed Section Dict"| Merge
+        
+        subgraph Map_Reduce_Phase ["Map-Reduce Execution"]
+            direction LR
+            C1["Chunk 1 (Part 1) + Overlaps"] --> M1("Map Summarizer")
+            C2["Chunk 1 (Part 2) + Overlaps"] --> M2("Map Summarizer")
             CN["Chunk N + Overlaps"] --> MN("Map Summarizer")
             
             M1 & M2 & MN --> Join["Concat Summaries"] --> Reduce("Reduce: Final Synthesis")
