@@ -5,7 +5,7 @@ from typing import List, Dict, Tuple, Any, Union
 from langsmith import Client as LangSmithClient
 from openai import OpenAI
 ls_client = LangSmithClient()
-
+from langsmith import traceable
 try:
     from langchainhub.client import Client
     pull = Client().pull
@@ -22,12 +22,26 @@ class VLLMProvider(LLMProvider):
         self.llm = llm_engine
         self.params_factory = sampling_params_class
         self.model_name = model_name
-
+        self.generations_log = []
+        
+    @traceable(run_type="llm", name="vLLM_Generate")
     def generate(self, prompts: List[str], sampling_params: Dict[str, Any]) -> List[str]:
         if not prompts: return[]
         vllm_params = self.params_factory(**sampling_params)
         outputs = self.llm.generate(prompts, vllm_params)
-        return[output.outputs[0].text for output in outputs]
+        texts = [output.outputs[0].text for output in outputs]
+        for p, t in zip(prompts, texts):
+            self.generations_log.append({
+                "timestamp": time.time(),
+                "model": self.model_name,
+                "prompt": p,
+                "response": t,
+                "params": sampling_params
+            })
+        return texts
+    def save_log_to_json(self, filename="debug_generations.json"):
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(self.generations_log, f, ensure_ascii=False, indent=2)
 
 class MistralProvider(LLMProvider):
     def __init__(self, api_key: str, model_name: str = "mistral-small-latest"):
